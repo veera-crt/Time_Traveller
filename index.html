@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Destination Alarm</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);
+--bg:#f6f7f9;--card:#fff;--text:#1a1d21;--muted:#6b7280;--line:#e2e5ea;--accent:#2563eb;--danger:#dc2626;--ok:#16a34a;color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#101216;--card:#1a1d23;--text:#eceef1;--muted:#9aa1ad;--line:#2b3038;--accent:#60a5fa;--danger:#f87171;--ok:#4ade80;color-scheme:dark}}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+main{max-width:520px;margin:0 auto;padding:16px;display:grid;gap:12px}
+h1{font-size:20px;margin:4px 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;display:grid;gap:10px}
+label{font-size:13px;color:var(--muted);display:grid;gap:4px}
+input,select{font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px;width:100%}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+button{font:inherit;border:0;border-radius:10px;padding:12px;background:var(--accent);color:#fff;font-weight:600}
+button.sec{background:var(--bg);color:var(--text);border:1px solid var(--line)}
+button.stop{background:var(--danger)}
+canvas{width:100%;height:260px;border-radius:12px;background:var(--bg);border:1px solid var(--line);touch-action:manipulation}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;text-align:center}
+.stats b{display:block;font-size:22px}
+.stats span{font-size:12px;color:var(--muted)}
+#status{font-size:14px;color:var(--muted)}
+#alarm{display:none;background:var(--danger);color:#fff;border-radius:14px;padding:16px;text-align:center;font-weight:700;animation:f 1s infinite}
+@keyframes f{50%{opacity:.6}}
+small{color:var(--muted)}
+a{color:var(--accent)}
+</style>
+</head>
+<body>
+<main>
+<h1>📍 Destination Alarm</h1>
+
+<div id="alarm">
+  ⏰ You are near your destination!
+  <button id="silence" style="margin-top:10px;width:100%;background:#fff;color:#dc2626">Stop alarm</button>
+</div>
+
+<div class="card">
+  <label>Destination (latitude, longitude)
+    <input id="dest" placeholder="e.g. 13.0827, 80.2707" inputmode="text">
+  </label>
+  <small>Tip: in Google Maps, long-press the place and copy the coordinates, or tap the map below to set it.</small>
+  <div class="row">
+    <label>Alarm distance (km)
+      <input id="radius" type="number" min="0.05" step="0.05" value="1">
+    </label>
+    <label>Check every
+      <select id="interval">
+        <option value="5">5 seconds</option>
+        <option value="10">10 seconds</option>
+        <option value="30" selected>30 seconds</option>
+        <option value="60">1 minute</option>
+        <option value="120">2 minutes</option>
+        <option value="300">5 minutes</option>
+        <option value="600">10 minutes</option>
+        <option value="custom">Custom…</option>
+      </select>
+    </label>
+  </div>
+  <label id="customWrap" style="display:none">Custom interval (seconds)
+    <input id="custom" type="number" min="2" value="20">
+  </label>
+  <label>Average speed if GPS speed is unavailable (km/h)
+    <input id="fallback" type="number" min="1" value="40">
+  </label>
+  <div class="row">
+    <button id="start">Start tracking</button>
+    <button id="stop" class="sec">Stop</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="stats">
+    <div><b id="km">–</b><span>km left</span></div>
+    <div><b id="eta">–</b><span>time left</span></div>
+    <div><b id="spd">–</b><span>km/h</span></div>
+  </div>
+  <canvas id="map" width="480" height="260"></canvas>
+  <div id="status">Not started.</div>
+  <a id="gmaps" href="#" target="_blank" rel="noopener" style="display:none">Open route in Google Maps ↗</a>
+</div>
+
+<small>Works with the screen locked. Distance is a straight line; time is estimated from your speed.</small>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let me = null, dest = null, prev = null, timer = null, wake = null, ctx = null, beepT = null, ringing = false;
+const R = 6371;
+
+function hav(a, b) {
+  const t = Math.PI / 180, dLa = (b.lat - a.lat) * t, dLo = (b.lng - a.lng) * t;
+  const x = Math.sin(dLa / 2) ** 2 + Math.cos(a.lat * t) * Math.cos(b.lat * t) * Math.sin(dLo / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(x));
+}
+function parseDest() {
+  const m = $('dest').value.match(/-?\d+(\.\d+)?/g);
+  if (m && m.length >= 2) { dest = { lat: +m[0], lng: +m[1] }; return true; }
+  dest = null; return false;
+}
+function fmtTime(h) {
+  if (!isFinite(h)) return '–';
+  const m = Math.round(h * 60);
+  return m >= 60 ? Math.floor(m / 60) + 'h ' + (m % 60) + 'm' : m + ' min';
+}
+
+/* ---------- Map (drawn on canvas, no external tiles) ---------- */
+let proj = null;
+function drawMap() {
+  const c = $('map'), g = c.getContext('2d'), W = c.width, H = c.height;
+  const css = getComputedStyle(document.documentElement);
+  const col = n => css.getPropertyValue(n).trim();
+  g.clearRect(0, 0, W, H);
+  g.strokeStyle = col('--line'); g.lineWidth = 1;
+  for (let x = 0; x < W; x += 40) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke(); }
+  for (let y = 0; y < H; y += 40) { g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke(); }
+  const pts = [me, dest].filter(Boolean);
+  if (!pts.length) { proj = null; g.fillStyle = col('--muted'); g.font = '16px system-ui'; g.textAlign = 'center'; g.fillText('Start tracking to see the map', W / 2, H / 2); return; }
+  const cLat = pts.reduce((s, p) => s + p.lat, 0) / pts.length, cLng = pts.reduce((s, p) => s + p.lng, 0) / pts.length;
+  const kx = 111.32 * Math.cos(cLat * Math.PI / 180), ky = 110.57;
+  let span = 2; // km minimum view
+  if (pts.length === 2) span = Math.max(span, Math.abs(pts[0].lng - pts[1].lng) * kx * 1.3, Math.abs(pts[0].lat - pts[1].lat) * ky * 1.3 * W / H);
+  const s = W / span; // px per km
+  proj = { cLat, cLng, kx, ky, s, W, H };
+  const P = p => ({ x: W / 2 + (p.lng - cLng) * kx * s, y: H / 2 - (p.lat - cLat) * ky * s });
+  if (dest) {
+    const d = P(dest), r = (+$('radius').value || 1) * s;
+    g.fillStyle = 'rgba(220,38,38,.12)'; g.strokeStyle = col('--danger'); g.beginPath(); g.arc(d.x, d.y, r, 0, 7); g.fill(); g.stroke();
+    g.fillStyle = col('--danger'); g.beginPath(); g.arc(d.x, d.y, 7, 0, 7); g.fill();
+    g.fillStyle = col('--text'); g.font = '12px system-ui'; g.textAlign = 'left'; g.fillText('Destination', d.x + 10, d.y - 8);
+  }
+  if (me && dest) {
+    const a = P(me), b = P(dest);
+    g.setLineDash([6, 6]); g.strokeStyle = col('--accent'); g.lineWidth = 2; g.beginPath(); g.moveTo(a.x, a.y); g.lineTo(b.x, b.y); g.stroke(); g.setLineDash([]);
+  }
+  if (me) {
+    const a = P(me);
+    g.fillStyle = 'rgba(37,99,235,.25)'; g.beginPath(); g.arc(a.x, a.y, 14, 0, 7); g.fill();
+    g.fillStyle = col('--accent'); g.strokeStyle = '#fff'; g.lineWidth = 2; g.beginPath(); g.arc(a.x, a.y, 7, 0, 7); g.fill(); g.stroke();
+    g.fillStyle = col('--text'); g.font = '12px system-ui'; g.textAlign = 'left'; g.fillText('You', a.x + 10, a.y - 8);
+  }
+}
+$('map').addEventListener('click', e => {
+  if (!proj) return;
+  const r = $('map').getBoundingClientRect();
+  const x = (e.clientX - r.left) * proj.W / r.width, y = (e.clientY - r.top) * proj.H / r.height;
+  const lng = proj.cLng + (x - proj.W / 2) / proj.s / proj.kx, lat = proj.cLat - (y - proj.H / 2) / proj.s / proj.ky;
+  $('dest').value = lat.toFixed(5) + ', ' + lng.toFixed(5);
+  parseDest(); update();
+});
+
+/* ---------- Alarm ---------- */
+function beep() {
+  if (!ctx) return;
+  const o = ctx.createOscillator(), g = ctx.createGain();
+  o.type = 'square'; o.frequency.value = 880; o.connect(g); g.connect(ctx.destination);
+  g.gain.setValueAtTime(.4, ctx.currentTime); g.gain.setValueAtTime(0, ctx.currentTime + .25);
+  o.start(); o.stop(ctx.currentTime + .3);
+  try { navigator.vibrate && navigator.vibrate(300); } catch (e) {}
+}
+function startAlarm() {
+  if (ringing) return; ringing = true; $('alarm').style.display = 'block';
+  beep(); beepT = setInterval(beep, 600);
+}
+function stopAlarm() { dismissed = true; ringing = false; clearInterval(beepT); $('alarm').style.display = 'none'; }
+$('silence').onclick = stopAlarm;
+
+/* ---------- Tracking (native background service on Android) ---------- */
+const CAP = window.Capacitor, native = !!(CAP && CAP.isNativePlatform && CAP.isNativePlatform());
+const BG = native ? CAP.registerPlugin('BackgroundGeolocation') : null;
+const LN = native ? CAP.Plugins.LocalNotifications : null;
+let watchId = null, lastRun = 0, latest = null, dismissed = false, running = false;
+
+function update(speedKmh) {
+  drawMap();
+  if (!me || !dest) return;
+  const km = hav(me, dest);
+  let v = speedKmh;
+  if (!(v > 2)) v = +$('fallback').value || 40;
+  $('km').textContent = km.toFixed(km < 10 ? 2 : 1);
+  $('eta').textContent = fmtTime(km / v);
+  $('spd').textContent = Math.round(v);
+  $('gmaps').style.display = 'inline';
+  $('gmaps').href = `https://www.google.com/maps/dir/?api=1&origin=${me.lat},${me.lng}&destination=${dest.lat},${dest.lng}`;
+  if (km <= (+$('radius').value || 1)) {
+    if (!dismissed) { startAlarm(); notifyNear(km); }
+  } else dismissed = false;
+}
+async function notifyNear(km) {
+  if (!LN) return;
+  try {
+    await LN.schedule({ notifications: [{ id: 1, channelId: 'alarm', title: '⏰ Destination near!', body: km.toFixed(2) + ' km left. Open the app to stop the alarm.', schedule: { at: new Date(Date.now() + 300) } }] });
+  } catch (e) {}
+}
+function process(loc) {
+  const now = Date.now();
+  if (now - lastRun < getInterval() * 1000 - 500) return;   // respect the interval you chose
+  lastRun = now;
+  me = { lat: loc.latitude, lng: loc.longitude };
+  let v = loc.speed != null && loc.speed >= 0 ? loc.speed * 3.6 : null;
+  if (!(v > 2) && prev) { const dt = (now - prev.t) / 3.6e6; if (dt > 0) v = hav(prev, me) / dt; }
+  prev = { ...me, t: now };
+  update(v);
+  $('status').textContent = 'Last check: ' + new Date().toLocaleTimeString() + ' (±' + Math.round(loc.accuracy || 0) + ' m)';
+}
+function getInterval() {
+  const v = $('interval').value;
+  return Math.max(2, +(v === 'custom' ? $('custom').value : v) || 30);
+}
+$('interval').onchange = () => { $('customWrap').style.display = $('interval').value === 'custom' ? 'grid' : 'none'; if (running) $('start').textContent = 'Tracking… (every ' + getInterval() + 's)'; };
+$('custom').onchange = () => $('interval').onchange();
+$('radius').oninput = () => drawMap();
+$('dest').onchange = () => { parseDest(); update(); };
+
+$('start').onclick = async () => {
+  if (!parseDest()) { $('status').textContent = 'Enter destination as "lat, lng" or tap the map.'; return; }
+  try { ctx = ctx || new (window.AudioContext || window.webkitAudioContext)(); await ctx.resume(); } catch (e) {}
+  stopAlarm(); dismissed = false; lastRun = 0; running = true;
+  if (native) {
+    try {
+      await LN.requestPermissions();
+      await LN.createChannel({ id: 'alarm', name: 'Destination alarm', importance: 5, visibility: 1, vibration: true });
+    } catch (e) {}
+    if (watchId) await BG.removeWatcher({ id: watchId });
+    watchId = await BG.addWatcher(
+      { backgroundTitle: 'Destination Alarm', backgroundMessage: 'Tracking your trip in the background', requestPermissions: true, stale: false, distanceFilter: 0 },
+      (loc, err) => {
+        if (err) { $('status').textContent = err.code === 'NOT_AUTHORIZED' ? 'Location permission denied. Allow it in Settings.' : 'Error: ' + err.message; return; }
+        process(loc);
+      });
+  } else {
+    if (watchId) navigator.geolocation.clearWatch(watchId);
+    watchId = navigator.geolocation.watchPosition(p => process({ latitude: p.coords.latitude, longitude: p.coords.longitude, speed: p.coords.speed, accuracy: p.coords.accuracy }),
+      e => { $('status').textContent = 'Location error: ' + e.message; }, { enableHighAccuracy: true });
+  }
+  $('start').textContent = 'Tracking… (every ' + getInterval() + 's)';
+  $('status').textContent = 'Waiting for GPS…';
+};
+$('stop').onclick = async () => {
+  running = false; stopAlarm();
+  try { if (native && watchId) await BG.removeWatcher({ id: watchId }); else if (watchId) navigator.geolocation.clearWatch(watchId); } catch (e) {}
+  watchId = null; $('start').textContent = 'Start tracking'; $('status').textContent = 'Stopped.';
+};
+drawMap();
+</script>
+</body>
+</html>
