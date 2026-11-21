@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Destination Alarm</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <style>
 :root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);
 --bg:#f6f7f9;--card:#fff;--text:#1a1d21;--muted:#6b7280;--line:#e2e5ea;--accent:#2563eb;--danger:#dc2626;--ok:#16a34a;color-scheme:light}
@@ -20,6 +22,7 @@ input,select{font:inherit;color:var(--text);background:var(--bg);border:1px soli
 button{font:inherit;border:0;border-radius:10px;padding:12px;background:var(--accent);color:#fff;font-weight:600}
 button.sec{background:var(--bg);color:var(--text);border:1px solid var(--line)}
 button.stop{background:var(--danger)}
+#lmap{width:100%;height:340px;border-radius:12px;border:1px solid var(--line);z-index:0}
 canvas{width:100%;height:260px;border-radius:12px;background:var(--bg);border:1px solid var(--line);touch-action:manipulation}
 .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;text-align:center}
 .stats b{display:block;font-size:22px}
@@ -41,10 +44,14 @@ a{color:var(--accent)}
 </div>
 
 <div class="card">
-  <label>Destination (latitude, longitude)
-    <input id="dest" placeholder="e.g. 13.0827, 80.2707" inputmode="text">
+  <label>Destination (place name or latitude, longitude)
+    <input id="dest" placeholder="e.g. Melur, Madurai  or  9.9252, 78.1198" inputmode="text">
   </label>
-  <small>Tip: in Google Maps, long-press the place and copy the coordinates, or tap the map below to set it.</small>
+  <div class="row">
+    <button id="find" class="sec">🔍 Find place</button>
+    <button id="loc" class="sec">📍 My location</button>
+  </div>
+  <small>Type a place name or coordinates, or just tap the map to choose your destination.</small>
   <div class="row">
     <label>Alarm distance (km)
       <input id="radius" type="number" min="0.05" step="0.05" value="1">
@@ -72,6 +79,7 @@ a{color:var(--accent)}
     <button id="start">Start tracking</button>
     <button id="stop" class="sec">Stop</button>
   </div>
+  <div id="msg" style="color:var(--danger);font-size:14px"></div>
 </div>
 
 <div class="card">
@@ -80,6 +88,7 @@ a{color:var(--accent)}
     <div><b id="eta">–</b><span>time left</span></div>
     <div><b id="spd">–</b><span>km/h</span></div>
   </div>
+  <div id="lmap"></div>
   <canvas id="map" width="480" height="260"></canvas>
   <div id="status">Not started.</div>
   <a id="gmaps" href="#" target="_blank" rel="noopener" style="display:none">Open route in Google Maps ↗</a>
@@ -112,6 +121,7 @@ function fmtTime(h) {
 /* ---------- Map (drawn on canvas, no external tiles) ---------- */
 let proj = null;
 function drawMap() {
+  if (LM) return drawLeaflet();
   const c = $('map'), g = c.getContext('2d'), W = c.width, H = c.height;
   const css = getComputedStyle(document.documentElement);
   const col = n => css.getPropertyValue(n).trim();
@@ -154,6 +164,38 @@ $('map').addEventListener('click', e => {
   parseDest(); update();
 });
 
+/* ---------- Real map (Leaflet + OpenStreetMap) ---------- */
+let LM = null, dM = null, dC = null, mM = null, ln = null, lastDest = null, fitMe = false;
+function initLeaflet() {
+  if (!window.L) return;
+  $('map').style.display = 'none';
+  LM = L.map('lmap').setView([20.59, 78.96], 5);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(LM);
+  LM.on('click', e => {
+    $('dest').value = e.latlng.lat.toFixed(5) + ', ' + e.latlng.lng.toFixed(5);
+    parseDest(); lastDest = dest.lat + ',' + dest.lng; update();
+  });
+  setTimeout(() => LM.invalidateSize(), 400);
+}
+function dot(p, color, tip) { return L.circleMarker([p.lat, p.lng], { radius: 9, color: '#fff', weight: 3, fillColor: color, fillOpacity: 1 }).addTo(LM).bindTooltip(tip); }
+function drawLeaflet() {
+  const rad = (+$('radius').value || 1) * 1000;
+  if (dest) {
+    if (!dM) { dM = dot(dest, '#dc2626', 'Destination'); dC = L.circle([dest.lat, dest.lng], { radius: rad, color: '#dc2626', fillOpacity: .12 }).addTo(LM); }
+    else { dM.setLatLng([dest.lat, dest.lng]); dC.setLatLng([dest.lat, dest.lng]); dC.setRadius(rad); }
+  } else if (dM) { LM.removeLayer(dM); LM.removeLayer(dC); dM = dC = null; }
+  if (me) { if (!mM) mM = dot(me, '#2563eb', 'You'); else mM.setLatLng([me.lat, me.lng]); }
+  if (me && dest) {
+    const pts = [[me.lat, me.lng], [dest.lat, dest.lng]];
+    if (!ln) ln = L.polyline(pts, { color: '#2563eb', dashArray: '6 8' }).addTo(LM); else ln.setLatLngs(pts);
+  } else if (ln) { LM.removeLayer(ln); ln = null; }
+  const key = dest ? dest.lat + ',' + dest.lng : null;
+  if (key && key !== lastDest) {
+    lastDest = key;
+    if (me) LM.fitBounds([[me.lat, me.lng], [dest.lat, dest.lng]], { padding: [40, 40] }); else LM.setView([dest.lat, dest.lng], 13);
+  } else if (me && !dest && !fitMe) { fitMe = true; LM.setView([me.lat, me.lng], 14); }
+}
+
 /* ---------- Alarm ---------- */
 function beep() {
   if (!ctx) return;
@@ -174,6 +216,27 @@ $('silence').onclick = stopAlarm;
 const CAP = window.Capacitor, native = !!(CAP && CAP.isNativePlatform && CAP.isNativePlatform());
 const BG = native ? CAP.registerPlugin('BackgroundGeolocation') : null;
 const LN = native ? CAP.Plugins.LocalNotifications : null;
+function say(t) { $('status').textContent = t; $('msg').textContent = t; }
+window.onerror = (m) => say('Error: ' + m);
+async function geocode(q) {
+  const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q));
+  const j = await r.json();
+  if (!j.length) return false;
+  $('dest').value = (+j[0].lat).toFixed(5) + ', ' + (+j[0].lon).toFixed(5);
+  return true;
+}
+$('find').onclick = async () => {
+  const q = $('dest').value.trim(); if (!q) return;
+  if (parseDest()) { update(); return; }
+  say('Searching…');
+  try { if (await geocode(q)) { parseDest(); update(); say(''); } else say('Place not found. Try another name or tap the map.'); }
+  catch (e) { say('Could not search. Check your internet.'); }
+};
+$('loc').onclick = () => {
+  say('Getting your location…');
+  navigator.geolocation.getCurrentPosition(p => { me = { lat: p.coords.latitude, lng: p.coords.longitude }; say(''); update(); if (LM && !dest) LM.setView([me.lat, me.lng], 14); },
+    e => say('Location error: ' + e.message), { enableHighAccuracy: true, timeout: 20000 });
+};
 let watchId = null, lastRun = 0, latest = null, dismissed = false, running = false;
 
 function update(speedKmh) {
@@ -188,7 +251,7 @@ function update(speedKmh) {
   $('gmaps').style.display = 'inline';
   $('gmaps').href = `https://www.google.com/maps/dir/?api=1&origin=${me.lat},${me.lng}&destination=${dest.lat},${dest.lng}`;
   if (km <= (+$('radius').value || 1)) {
-    if (!dismissed) { startAlarm(); notifyNear(km); }
+    if (running && !dismissed) { startAlarm(); notifyNear(km); }
   } else dismissed = false;
 }
 async function notifyNear(km) {
@@ -206,7 +269,7 @@ function process(loc) {
   if (!(v > 2) && prev) { const dt = (now - prev.t) / 3.6e6; if (dt > 0) v = hav(prev, me) / dt; }
   prev = { ...me, t: now };
   update(v);
-  $('status').textContent = 'Last check: ' + new Date().toLocaleTimeString() + ' (±' + Math.round(loc.accuracy || 0) + ' m)';
+  $('msg').textContent = ''; $('status').textContent = 'Last check: ' + new Date().toLocaleTimeString() + ' (±' + Math.round(loc.accuracy || 0) + ' m)';
 }
 function getInterval() {
   const v = $('interval').value;
@@ -218,7 +281,15 @@ $('radius').oninput = () => drawMap();
 $('dest').onchange = () => { parseDest(); update(); };
 
 $('start').onclick = async () => {
-  if (!parseDest()) { $('status').textContent = 'Enter destination as "lat, lng" or tap the map.'; return; }
+  if (!parseDest()) {
+    const q = $('dest').value.trim();
+    if (!q) { say('Enter a destination first.'); return; }
+    say('Searching place…');
+    try { if (!(await geocode(q))) { say('Place not found. Try a bigger place name or enter "lat, lng".'); return; } }
+    catch (e) { say('Could not search the place. Check internet or enter "lat, lng".'); return; }
+    parseDest(); update();
+  }
+  say('Starting…');
   try { ctx = ctx || new (window.AudioContext || window.webkitAudioContext)(); await ctx.resume(); } catch (e) {}
   stopAlarm(); dismissed = false; lastRun = 0; running = true;
   if (native) {
@@ -230,7 +301,7 @@ $('start').onclick = async () => {
     watchId = await BG.addWatcher(
       { backgroundTitle: 'Destination Alarm', backgroundMessage: 'Tracking your trip in the background', requestPermissions: true, stale: false, distanceFilter: 0 },
       (loc, err) => {
-        if (err) { $('status').textContent = err.code === 'NOT_AUTHORIZED' ? 'Location permission denied. Allow it in Settings.' : 'Error: ' + err.message; return; }
+        if (err) { say(err.code === 'NOT_AUTHORIZED' ? 'Location permission denied. Allow it in Settings > Apps > Destination Alarm > Permissions.' : 'Error: ' + err.message); return; }
         process(loc);
       });
   } else {
@@ -239,13 +310,14 @@ $('start').onclick = async () => {
       e => { $('status').textContent = 'Location error: ' + e.message; }, { enableHighAccuracy: true });
   }
   $('start').textContent = 'Tracking… (every ' + getInterval() + 's)';
-  $('status').textContent = 'Waiting for GPS…';
+  say('Waiting for GPS… the first check can take up to a minute.');
 };
 $('stop').onclick = async () => {
   running = false; stopAlarm();
   try { if (native && watchId) await BG.removeWatcher({ id: watchId }); else if (watchId) navigator.geolocation.clearWatch(watchId); } catch (e) {}
   watchId = null; $('start').textContent = 'Start tracking'; $('status').textContent = 'Stopped.';
 };
+initLeaflet();
 drawMap();
 </script>
 </body>
